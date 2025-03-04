@@ -7,28 +7,37 @@ import (
 )
 
 type CacheProvider interface {
-	LoadAndLock(ctx context.Context, key string) (v model.LockerValue, err error)
-	Unlock(key string)
-	DoTry(tx *gorm.DB, tccContext *model.TccContext, value model.LockerValue, tryBody interface{}) (code model.TccCode, message string, err error)
-	DoConfirm(tx *gorm.DB, tccContext *model.TccContext, key string, confirmBody interface{}) (model.TccCode, string, error)
-	DoCancel(tx *gorm.DB, tccContext *model.TccContext, key model.LockerValue, cancelBody interface{}) (model.TccCode, string, error)
+	LoadAndLock(ctx context.Context, tx *gorm.DB, key model.LockerKey) (v model.LockerValue, err error)
+	Unlock(key model.LockerKey)
+	DoTry(tx *gorm.DB, tccContext *model.TccContext, key model.LockerKey, value model.LockerValue, tryBody interface{}) (tccCode model.TccCode, code string, message string, err error)
+	DoConfirm(tx *gorm.DB, tccContext *model.TccContext, key model.LockerKey, value model.LockerValue, confirmBody interface{}) (tccCode model.TccCode, code string, message string, err error)
+	DoCancel(tx *gorm.DB, tccContext *model.TccContext, key model.LockerKey, value model.LockerValue, cancelBody interface{}) (tccCode model.TccCode, code string, message string, err error)
+	DoMust(tx *gorm.DB, tccContext *model.TccContext, key model.LockerKey, value model.LockerValue, mustBody interface{}) (tccCode model.TccCode, code string, essage string, err error)
 }
 
 type WalProvider interface {
+	CatchupWals(tx *gorm.DB, key model.LockerKey, load model.LockerValue) (err error)
+	Create(ctx context.Context, key model.LockerKey)
 }
 
 type PersistProvider interface {
-	Load(tx *gorm.DB, key string) (value model.LockerValue, err error)
+	Load(tx *gorm.DB, key model.LockerKey) (exists bool, value model.LockerValue, err error)
+	Flush(tx *gorm.DB, value model.LockerValue) (err error)
 }
-
 type TccProvider interface {
 	BarrierTry(tccContext *model.TccContext, tx *gorm.DB) (callIt bool, err error)
 	BarrierConfirm(tccContext *model.TccContext, tx *gorm.DB) (callIt bool, err error)
 	BarrierCancel(tccContext *model.TccContext, tx *gorm.DB) (callIt bool, err error)
+	BarrierMust(tccContext *model.TccContext, tx *gorm.DB) (callIt bool, err error)
 }
 
 type TccBusinessProvider interface {
 	Try(tx *gorm.DB, tccContext *model.TccContext, value model.LockerValue, body interface{}) (ok bool, code string, message string, err error)
 	Confirm(tx *gorm.DB, tccContext *model.TccContext, key model.LockerKey, body interface{}) (ok bool, code string, message string, err error)
 	Cancel(tx *gorm.DB, tccContext *model.TccContext, key model.LockerKey, body interface{}) (ok bool, code string, message string, err error)
+	Must(tx *gorm.DB, tccContext *model.TccContext, key model.LockerKey, body interface{}) (ok bool, code string, message string, err error)
+}
+
+type LockValueIniter interface {
+	Create(ctx context.Context, key model.LockerKey) (v model.LockerValue, err error)
 }
