@@ -1,4 +1,4 @@
-module walock
+module github.com/latifrons/walock
 
 go 1.21
 
