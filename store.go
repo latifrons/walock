@@ -1,9 +1,9 @@
 package walock
 
 import (
+	"github.com/latifrons/walock/model"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/rs/zerolog/log"
-	"walock/model"
 )
 
 import (

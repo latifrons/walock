@@ -2,8 +2,8 @@ package walock
 
 import (
 	"context"
+	"github.com/latifrons/walock/model"
 	"gorm.io/gorm"
-	"walock/model"
 )
 
 type CacheProvider interface {

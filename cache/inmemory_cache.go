@@ -1,13 +1,13 @@
 package cache
 
 import (
+	"github.com/latifrons/walock"
+	"github.com/latifrons/walock/model"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/rs/zerolog/log"
 	"gorm.io/gorm"
 	"sync"
 	"time"
-	"walock"
-	"walock/model"
 )
 
 type InmemoryCache struct {
