@@ -10,6 +10,6 @@ type Locker struct {
 type LockerValue interface {
 	GetVersion() uint64
 	GetDbVersion() uint64
+	SetDbVersion(v uint64)
 }
-
 type LockerKey string

@@ -185,3 +185,7 @@ func (w *WalockStore) Cancel(ctx context.Context, tccContext *model.TccContext, 
 	}
 	return
 }
+
+func (w *WalockStore) FlushDirty() (err error) {
+	return w.CacheProvider.FlushDirty(w.QuotaDbRw)
+}
