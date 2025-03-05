@@ -33,7 +33,7 @@ type WalockStore struct {
 }
 
 func (w *WalockStore) Get(ctx context.Context, key model.LockerKey) (value model.LockerValue, err error) {
-	valuePointer, err := w.CacheProvider.LoadAndLock(ctx, nil, key)
+	valuePointer, err := w.CacheProvider.LoadAndLock(ctx, w.QuotaDbRw, key)
 	if err != nil {
 		return
 	}
@@ -49,7 +49,7 @@ func (w *WalockStore) Get(ctx context.Context, key model.LockerKey) (value model
 }
 
 func (w *WalockStore) Must(ctx context.Context, tccContext *model.TccContext, lockKey model.LockerKey, mustBody interface{}) (tccCode model.TccCode, code string, message string, err error) {
-	value, err := w.CacheProvider.LoadAndLock(ctx, nil, lockKey)
+	value, err := w.CacheProvider.LoadAndLock(ctx, w.QuotaDbRw, lockKey)
 	if err != nil {
 		return
 	}
@@ -87,7 +87,7 @@ func (w *WalockStore) Must(ctx context.Context, tccContext *model.TccContext, lo
 }
 
 func (w *WalockStore) Try(ctx context.Context, tccContext *model.TccContext, lockKey model.LockerKey, tryBody interface{}) (tccCode model.TccCode, code string, message string, err error) {
-	value, err := w.CacheProvider.LoadAndLock(ctx, nil, lockKey)
+	value, err := w.CacheProvider.LoadAndLock(ctx, w.QuotaDbRw, lockKey)
 	if err != nil {
 		return
 	}
@@ -150,7 +150,7 @@ func (w *WalockStore) Confirm(ctx context.Context, tccContext *model.TccContext,
 }
 
 func (w *WalockStore) Cancel(ctx context.Context, tccContext *model.TccContext, lockKey model.LockerKey, cancelBody interface{}) (tccCode model.TccCode, code string, message string, err error) {
-	value, err := w.CacheProvider.LoadAndLock(ctx, nil, lockKey)
+	value, err := w.CacheProvider.LoadAndLock(ctx, w.QuotaDbRw, lockKey)
 	if err != nil {
 		return
 	}

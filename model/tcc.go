@@ -1,5 +1,7 @@
 package model
 
+import "time"
+
 type TccContext struct {
 	GlobalId string
 	BranchId string
@@ -16,3 +18,8 @@ const (
 	TccCode_Failed  TccCode = 1
 	TccCode_Timeout TccCode = 2
 )
+
+type TccBarrierReceiver struct {
+	Key  string    `gorm:"size:100;primarykey"`
+	Time time.Time `gorm:"index"`
+}

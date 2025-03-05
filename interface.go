@@ -17,7 +17,9 @@ type CacheProvider interface {
 
 type WalProvider interface {
 	CatchupWals(tx *gorm.DB, key model.LockerKey, load model.LockerValue) (err error)
-	Create(ctx context.Context, key model.LockerKey)
+	ApplyWal(load model.LockerValue, walis []interface{}) (err error)
+	FlushWal(tx *gorm.DB, wali interface{}) (err error)
+	FlushBackToDb(tx *gorm.DB, lockedQuota model.LockerValue) (err error)
 }
 
 type PersistProvider interface {
@@ -32,10 +34,14 @@ type TccProvider interface {
 }
 
 type TccBusinessProvider interface {
-	Try(tx *gorm.DB, tccContext *model.TccContext, value model.LockerValue, body interface{}) (ok bool, code string, message string, err error)
-	Confirm(tx *gorm.DB, tccContext *model.TccContext, key model.LockerKey, body interface{}) (ok bool, code string, message string, err error)
-	Cancel(tx *gorm.DB, tccContext *model.TccContext, key model.LockerKey, body interface{}) (ok bool, code string, message string, err error)
-	Must(tx *gorm.DB, tccContext *model.TccContext, key model.LockerKey, body interface{}) (ok bool, code string, message string, err error)
+	TryWal(tx *gorm.DB, tccContext *model.TccContext, key model.LockerKey, value model.LockerValue, tryBody interface{}) (ok bool, code string, message string, tryWali interface{}, err error)
+	//Confirm(tx *gorm.DB, tccContext *model.TccContext, key model.LockerKey, value model.LockerValue, wal interface{}) (ok bool, code string, message string, err error)
+	//Cancel(tx *gorm.DB, tccContext *model.TccContext, key model.LockerKey, value model.LockerValue, wal interface{}) (ok bool, code string, message string, err error)
+	ConfirmWal(tx *gorm.DB, tccContext *model.TccContext, key model.LockerKey, value model.LockerValue, reservationWali interface{}) (confirmWali interface{})
+	CancelWal(tx *gorm.DB, tccContext *model.TccContext, key model.LockerKey, value model.LockerValue, reservationWali interface{}) (revertWali interface{})
+
+	MustWal(tx *gorm.DB, tccContext *model.TccContext, key model.LockerKey, value model.LockerValue, mustBody interface{}) (ok bool, code string, message string, mustWali interface{}, err error)
+	LoadReservation(tx *gorm.DB, tccContext *model.TccContext) (wal interface{}, ok bool, code string, message string, err error)
 }
 
 type LockValueIniter interface {
