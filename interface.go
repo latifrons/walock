@@ -19,7 +19,6 @@ type WalProvider interface {
 	CatchupWals(tx *gorm.DB, key model.LockerKey, load model.LockerValue) (err error)
 	ApplyWal(load model.LockerValue, walis []interface{}) (err error)
 	FlushWal(tx *gorm.DB, wali interface{}) (err error)
-	FlushBackToDb(tx *gorm.DB, lockedQuota model.LockerValue) (err error)
 }
 
 type PersistProvider interface {

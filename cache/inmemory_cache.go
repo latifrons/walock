@@ -14,12 +14,12 @@ import (
 )
 
 type InmemoryCache struct {
-	PersistProvider     walock.PersistProvider
-	TccBusinessProvider walock.TccBusinessProvider
-	WalProvider         walock.WalProvider
-	LockerValueIniter   walock.LockValueIniter
-	QuotaLockWaitTime   prometheus.Histogram
-	accounts            sync.Map
+	PersistProvider          walock.PersistProvider
+	TccBusinessProvider      walock.TccBusinessProvider
+	WalProvider              walock.WalProvider
+	LockerValueIniter        walock.LockValueIniter
+	MetricsQuotaLockWaitTime prometheus.Histogram
+	accounts                 sync.Map
 }
 
 func (c *InmemoryCache) LoadAndLock(ctx context.Context, tx *gorm.DB, key model.LockerKey) (lockValue model.LockerValue, err error) {
@@ -28,8 +28,8 @@ func (c *InmemoryCache) LoadAndLock(ctx context.Context, tx *gorm.DB, key model.
 	lock.Mu.Lock()
 	lockedTime := time.Now()
 
-	if c.QuotaLockWaitTime != nil {
-		c.QuotaLockWaitTime.Observe(lockedTime.Sub(startTime).Seconds())
+	if c.MetricsQuotaLockWaitTime != nil {
+		c.MetricsQuotaLockWaitTime.Observe(lockedTime.Sub(startTime).Seconds())
 	}
 
 	defer func() {
