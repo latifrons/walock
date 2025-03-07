@@ -32,6 +32,10 @@ type WalockStore struct {
 	LockHoldTime  *prometheus.HistogramVec
 }
 
+func (w *WalockStore) Keys() (keys []model.LockerKey) {
+	return w.CacheProvider.Keys()
+}
+
 func (w *WalockStore) Get(ctx context.Context, key model.LockerKey) (value model.LockerValue, err error) {
 	valuePointer, err := w.CacheProvider.LoadAndLock(ctx, w.QuotaDbRw, key)
 	if err != nil {
@@ -183,6 +187,24 @@ func (w *WalockStore) Cancel(ctx context.Context, tccContext *model.TccContext, 
 		log.Debug().Str("gid", tccContext.GlobalId).Str("bid", tccContext.BranchId).Err(err).Msg("tx reverted Cancel")
 		return
 	}
+	return
+}
+
+func (w *WalockStore) Update(ctx context.Context, lockKey model.LockerKey, updatedValue model.LockerValue,
+	updater func(baseV, updateV model.LockerValue) (updated bool)) (err error) {
+	baseValue, err := w.CacheProvider.LoadAndLock(ctx, w.QuotaDbRw, lockKey)
+	if err != nil {
+		return
+	}
+
+	startTime := time.Now()
+	defer func() {
+		w.LockHoldTime.WithLabelValues(w.MetricsName + "_update").Observe(time.Now().Sub(startTime).Seconds())
+		w.CacheProvider.Unlock(lockKey)
+	}()
+
+	updated := updater(baseValue, updatedValue)
+	_ = updated
 	return
 }
 

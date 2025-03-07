@@ -17,10 +17,18 @@ type InmemoryCache struct {
 	PersistProvider          walock.PersistProvider
 	TccBusinessProvider      walock.TccBusinessProvider
 	WalProvider              walock.WalProvider
-	LockerValueIniter        walock.LockValueIniter
 	MetricsQuotaLockWaitTime prometheus.Histogram
 	QuotaAccountCount        prometheus.Gauge
 	accounts                 sync.Map // string:*model.Locker
+}
+
+func (c *InmemoryCache) Keys() []model.LockerKey {
+	keys := make([]model.LockerKey, 0)
+	c.accounts.Range(func(key, value interface{}) bool {
+		keys = append(keys, model.LockerKey(key.(string)))
+		return true
+	})
+	return keys
 }
 
 func (c *InmemoryCache) LoadAndLock(ctx context.Context, tx *gorm.DB, key model.LockerKey) (lockValue model.LockerValue, err error) {
@@ -197,17 +205,10 @@ func (c *InmemoryCache) ensureUserMiniLock(key model.LockerKey) *model.Locker {
 }
 
 func (c *InmemoryCache) ensure(ctx context.Context, tx *gorm.DB, key model.LockerKey) (value model.LockerValue, err error) {
-	exists, value, err := c.PersistProvider.Load(tx, key)
+	value, err = c.PersistProvider.Load(tx, key)
 	if err != nil {
 		log.Error().Err(err).Msg("failed to load from persist")
 		return
-	}
-	if !exists {
-		value, err = c.LockerValueIniter.Create(ctx, key)
-		if err != nil {
-			log.Error().Err(err).Msg("failed to create new value")
-			return
-		}
 	}
 	// replay wals
 	err = c.WalProvider.CatchupWals(tx, key, value)

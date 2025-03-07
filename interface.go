@@ -14,6 +14,7 @@ type CacheProvider interface {
 	DoCancel(tx *gorm.DB, tccContext *model.TccContext, key model.LockerKey, value model.LockerValue, cancelBody interface{}) (tccCode model.TccCode, code string, message string, err error)
 	DoMust(tx *gorm.DB, tccContext *model.TccContext, key model.LockerKey, value model.LockerValue, mustBody interface{}) (tccCode model.TccCode, code string, essage string, err error)
 	FlushDirty(tx *gorm.DB) (err error)
+	Keys() []model.LockerKey
 }
 
 type WalProvider interface {
@@ -23,7 +24,7 @@ type WalProvider interface {
 }
 
 type PersistProvider interface {
-	Load(tx *gorm.DB, key model.LockerKey) (exists bool, value model.LockerValue, err error)
+	Load(tx *gorm.DB, key model.LockerKey) (value model.LockerValue, err error)
 	Flush(tx *gorm.DB, value model.LockerValue) (err error)
 }
 type TccProvider interface {
@@ -35,15 +36,8 @@ type TccProvider interface {
 
 type TccBusinessProvider interface {
 	TryWal(tx *gorm.DB, tccContext *model.TccContext, key model.LockerKey, value model.LockerValue, tryBody interface{}) (ok bool, code string, message string, tryWali interface{}, err error)
-	//Confirm(tx *gorm.DB, tccContext *model.TccContext, key model.LockerKey, value model.LockerValue, wal interface{}) (ok bool, code string, message string, err error)
-	//Cancel(tx *gorm.DB, tccContext *model.TccContext, key model.LockerKey, value model.LockerValue, wal interface{}) (ok bool, code string, message string, err error)
 	ConfirmWal(tx *gorm.DB, tccContext *model.TccContext, key model.LockerKey, value model.LockerValue, reservationWali interface{}) (confirmWali interface{})
 	CancelWal(tx *gorm.DB, tccContext *model.TccContext, key model.LockerKey, value model.LockerValue, reservationWali interface{}) (revertWali interface{})
-
 	MustWal(tx *gorm.DB, tccContext *model.TccContext, key model.LockerKey, value model.LockerValue, mustBody interface{}) (ok bool, code string, message string, mustWali interface{}, err error)
 	LoadReservation(tx *gorm.DB, tccContext *model.TccContext) (wal interface{}, ok bool, code string, message string, err error)
-}
-
-type LockValueIniter interface {
-	Create(ctx context.Context, key model.LockerKey) (v model.LockerValue, err error)
 }
