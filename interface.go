@@ -14,6 +14,7 @@ type CacheProvider interface {
 	DoCancel(tx *gorm.DB, tccContext *model.TccContext, key model.LockerKey, value model.LockerValue, cancelBody interface{}) (tccCode model.TccCode, code string, message string, err error)
 	DoMust(tx *gorm.DB, tccContext *model.TccContext, key model.LockerKey, value model.LockerValue, mustBody interface{}) (tccCode model.TccCode, code string, essage string, err error)
 	FlushDirty(tx *gorm.DB) (err error)
+	Traverse(func(key model.LockerKey, value model.LockerValue) bool)
 	Keys() []model.LockerKey
 }
 
@@ -35,6 +36,11 @@ type TccProvider interface {
 }
 
 type TccBusinessProvider interface {
+	// ok: if the action is successful.
+	// code: the business error code. "" if ok is true.
+	// message: the error message. "" if ok is true.
+	// tryWali: the try WAL object to be persisted. nil if ok is false.
+	// err: any system error. nil if ok is true.
 	TryWal(tx *gorm.DB, tccContext *model.TccContext, key model.LockerKey, value model.LockerValue, tryBody interface{}) (ok bool, code string, message string, tryWali interface{}, err error)
 	ConfirmWal(tx *gorm.DB, tccContext *model.TccContext, key model.LockerKey, value model.LockerValue, reservationWali interface{}) (confirmWali interface{})
 	CancelWal(tx *gorm.DB, tccContext *model.TccContext, key model.LockerKey, value model.LockerValue, reservationWali interface{}) (revertWali interface{})

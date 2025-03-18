@@ -14,31 +14,52 @@ import (
 )
 
 type InmemoryCache struct {
-	PersistProvider          walock.PersistProvider
-	TccBusinessProvider      walock.TccBusinessProvider
-	WalProvider              walock.WalProvider
-	MetricsQuotaLockWaitTime prometheus.Histogram
-	QuotaAccountCount        prometheus.Gauge
-	accounts                 sync.Map // string:*model.Locker
+	PersistProvider     walock.PersistProvider
+	TccBusinessProvider walock.TccBusinessProvider
+	WalProvider         walock.WalProvider
+	MetricsLockWaitTime prometheus.Histogram
+	MetricsMapCount     prometheus.Gauge
+	accounts            sync.Map // string:*model.Locker
 }
 
-func (c *InmemoryCache) Keys() []model.LockerKey {
+func (f *InmemoryCache) Traverse(fun func(key model.LockerKey, value model.LockerValue) bool) {
+	total := 0
+
+	f.accounts.Range(func(key, value any) bool {
+		total += 1
+		lock := f.ensureUserMiniLock(model.LockerKey(key.(string)))
+		lock.Mu.Lock()
+
+		defer func() {
+			lock.Mu.Unlock()
+		}()
+
+		if lock.Value == nil {
+			log.Warn().Any("key", key).Msg("for some reason value is nil. maybe it is being initialized")
+			return true
+		}
+
+		return fun(model.LockerKey(key.(string)), lock.Value)
+	})
+}
+
+func (f *InmemoryCache) Keys() []model.LockerKey {
 	keys := make([]model.LockerKey, 0)
-	c.accounts.Range(func(key, value interface{}) bool {
+	f.accounts.Range(func(key, value interface{}) bool {
 		keys = append(keys, model.LockerKey(key.(string)))
 		return true
 	})
 	return keys
 }
 
-func (c *InmemoryCache) LoadAndLock(ctx context.Context, tx *gorm.DB, key model.LockerKey) (lockValue model.LockerValue, err error) {
+func (f *InmemoryCache) LoadAndLock(ctx context.Context, tx *gorm.DB, key model.LockerKey) (lockValue model.LockerValue, err error) {
 	startTime := time.Now()
-	lock := c.ensureUserMiniLock(key)
+	lock := f.ensureUserMiniLock(key)
 	lock.Mu.Lock()
 	lockedTime := time.Now()
 
-	if c.MetricsQuotaLockWaitTime != nil {
-		c.MetricsQuotaLockWaitTime.Observe(lockedTime.Sub(startTime).Seconds())
+	if f.MetricsLockWaitTime != nil {
+		f.MetricsLockWaitTime.Observe(lockedTime.Sub(startTime).Seconds())
 	}
 
 	defer func() {
@@ -55,7 +76,7 @@ func (c *InmemoryCache) LoadAndLock(ctx context.Context, tx *gorm.DB, key model.
 	if lock.Value == nil {
 		// load from database
 		var newValue model.LockerValue
-		newValue, err = c.ensure(ctx, tx, key)
+		newValue, err = f.ensure(ctx, tx, key)
 		if err != nil {
 			return
 		}
@@ -66,14 +87,14 @@ func (c *InmemoryCache) LoadAndLock(ctx context.Context, tx *gorm.DB, key model.
 	return
 }
 
-func (c *InmemoryCache) Unlock(key model.LockerKey) {
-	lock := c.ensureUserMiniLock(key)
+func (f *InmemoryCache) Unlock(key model.LockerKey) {
+	lock := f.ensureUserMiniLock(key)
 	lock.Mu.Unlock()
 }
 
-func (c *InmemoryCache) DoMust(tx *gorm.DB, tccContext *model.TccContext, key model.LockerKey, value model.LockerValue, mustBody interface{}) (tccCode model.TccCode, code string, message string, err error) {
+func (f *InmemoryCache) DoMust(tx *gorm.DB, tccContext *model.TccContext, key model.LockerKey, value model.LockerValue, mustBody interface{}) (tccCode model.TccCode, code string, message string, err error) {
 	log.Debug().Str("tcc", tccContext.String()).Msg("DoMust")
-	ok, code, message, mustWali, err := c.TccBusinessProvider.MustWal(tx, tccContext, key, value, mustBody)
+	ok, code, message, mustWali, err := f.TccBusinessProvider.MustWal(tx, tccContext, key, value, mustBody)
 	if err != nil {
 		return
 	}
@@ -83,13 +104,13 @@ func (c *InmemoryCache) DoMust(tx *gorm.DB, tccContext *model.TccContext, key mo
 	}
 
 	// write wal first
-	err = c.WalProvider.FlushWal(tx, mustWali)
+	err = f.WalProvider.FlushWal(tx, mustWali)
 	if err != nil {
 		return
 	}
 
 	// update memory
-	err = c.WalProvider.ApplyWal(value, []interface{}{mustWali})
+	err = f.WalProvider.ApplyWal(value, []interface{}{mustWali})
 	if err != nil {
 		log.Panic().Err(err).Msg("failed to apply mustWali")
 		return
@@ -99,9 +120,9 @@ func (c *InmemoryCache) DoMust(tx *gorm.DB, tccContext *model.TccContext, key mo
 	return
 }
 
-func (c *InmemoryCache) DoTry(tx *gorm.DB, tccContext *model.TccContext, key model.LockerKey, value model.LockerValue, tryBody interface{}) (tccCode model.TccCode, code string, message string, err error) {
+func (f *InmemoryCache) DoTry(tx *gorm.DB, tccContext *model.TccContext, key model.LockerKey, value model.LockerValue, tryBody interface{}) (tccCode model.TccCode, code string, message string, err error) {
 	log.Debug().Str("tcc", tccContext.String()).Msg("DoTry")
-	ok, code, message, tryWali, err := c.TccBusinessProvider.TryWal(tx, tccContext, key, value, tryBody)
+	ok, code, message, tryWali, err := f.TccBusinessProvider.TryWal(tx, tccContext, key, value, tryBody)
 	if err != nil {
 		return
 	}
@@ -111,13 +132,13 @@ func (c *InmemoryCache) DoTry(tx *gorm.DB, tccContext *model.TccContext, key mod
 	}
 
 	// write wal first
-	err = c.WalProvider.FlushWal(tx, tryWali)
+	err = f.WalProvider.FlushWal(tx, tryWali)
 	if err != nil {
 		return
 	}
 
 	// update memory
-	err = c.WalProvider.ApplyWal(value, []interface{}{tryWali})
+	err = f.WalProvider.ApplyWal(value, []interface{}{tryWali})
 	if err != nil {
 		log.Panic().Err(err).Msg("failed to apply tryWali")
 		return
@@ -126,11 +147,11 @@ func (c *InmemoryCache) DoTry(tx *gorm.DB, tccContext *model.TccContext, key mod
 	return
 }
 
-func (c *InmemoryCache) DoConfirm(tx *gorm.DB, tccContext *model.TccContext, key model.LockerKey, value model.LockerValue, confirmBody interface{}) (tccCode model.TccCode, code string, message string, err error) {
+func (f *InmemoryCache) DoConfirm(tx *gorm.DB, tccContext *model.TccContext, key model.LockerKey, value model.LockerValue, confirmBody interface{}) (tccCode model.TccCode, code string, message string, err error) {
 	log.Debug().Str("tcc", tccContext.String()).Msg("DoConfirm")
 
 	// check if reserved resource is there.
-	reservationWali, ok, code, message, err := c.TccBusinessProvider.LoadReservation(tx, tccContext)
+	reservationWali, ok, code, message, err := f.TccBusinessProvider.LoadReservation(tx, tccContext)
 	if err != nil {
 		return
 	}
@@ -140,20 +161,20 @@ func (c *InmemoryCache) DoConfirm(tx *gorm.DB, tccContext *model.TccContext, key
 		return
 	}
 
-	confirmWali := c.TccBusinessProvider.ConfirmWal(tx, tccContext, key, value, reservationWali)
+	confirmWali := f.TccBusinessProvider.ConfirmWal(tx, tccContext, key, value, reservationWali)
 	if confirmWali == nil {
 		tccCode = model.TccCode_Success
 		return
 	}
 
 	// write wal first
-	err = c.WalProvider.FlushWal(tx, confirmWali)
+	err = f.WalProvider.FlushWal(tx, confirmWali)
 	if err != nil {
 		return
 	}
 
 	// update memory
-	err = c.WalProvider.ApplyWal(value, []interface{}{confirmWali})
+	err = f.WalProvider.ApplyWal(value, []interface{}{confirmWali})
 	if err != nil {
 		log.Panic().Err(err).Msg("failed to apply confirmWali")
 		return
@@ -162,30 +183,30 @@ func (c *InmemoryCache) DoConfirm(tx *gorm.DB, tccContext *model.TccContext, key
 	return
 }
 
-func (c *InmemoryCache) DoCancel(tx *gorm.DB, tccContext *model.TccContext, key model.LockerKey, value model.LockerValue, cancelBody interface{}) (tccCode model.TccCode, code string, message string, err error) {
+func (f *InmemoryCache) DoCancel(tx *gorm.DB, tccContext *model.TccContext, key model.LockerKey, value model.LockerValue, cancelBody interface{}) (tccCode model.TccCode, code string, message string, err error) {
 	log.Debug().Str("tcc", tccContext.String()).Msg("DoCancel")
 
 	// check if reserved resource is there.
-	reservationWali, ok, code, message, err := c.TccBusinessProvider.LoadReservation(tx, tccContext)
+	reservationWali, ok, code, message, err := f.TccBusinessProvider.LoadReservation(tx, tccContext)
 	if !ok {
 		tccCode = model.TccCode_Failed
 		return
 	}
 
-	revertWali := c.TccBusinessProvider.CancelWal(tx, tccContext, key, value, reservationWali)
+	revertWali := f.TccBusinessProvider.CancelWal(tx, tccContext, key, value, reservationWali)
 	if revertWali == nil {
 		tccCode = model.TccCode_Success
 		return
 	}
 
 	// write wal first
-	err = c.WalProvider.FlushWal(tx, revertWali)
+	err = f.WalProvider.FlushWal(tx, revertWali)
 	if err != nil {
 		return
 	}
 
 	// update memory
-	err = c.WalProvider.ApplyWal(value, []interface{}{revertWali})
+	err = f.WalProvider.ApplyWal(value, []interface{}{revertWali})
 	if err != nil {
 		log.Panic().Err(err).Msg("failed to apply reservationWali")
 		return
@@ -195,8 +216,8 @@ func (c *InmemoryCache) DoCancel(tx *gorm.DB, tccContext *model.TccContext, key 
 }
 
 // ensureUserMiniLock retrieves an existing account or creates a new one
-func (c *InmemoryCache) ensureUserMiniLock(key model.LockerKey) *model.Locker {
-	account, loaded := c.accounts.LoadOrStore(string(key), &model.Locker{})
+func (f *InmemoryCache) ensureUserMiniLock(key model.LockerKey) *model.Locker {
+	account, loaded := f.accounts.LoadOrStore(string(key), &model.Locker{})
 	if !loaded {
 		log.Debug().Str("userId", string(key)).Msg("new account lock created")
 	}
@@ -204,20 +225,20 @@ func (c *InmemoryCache) ensureUserMiniLock(key model.LockerKey) *model.Locker {
 	return account.(*model.Locker)
 }
 
-func (c *InmemoryCache) ensure(ctx context.Context, tx *gorm.DB, key model.LockerKey) (value model.LockerValue, err error) {
-	value, err = c.PersistProvider.Load(tx, key)
+func (f *InmemoryCache) ensure(ctx context.Context, tx *gorm.DB, key model.LockerKey) (value model.LockerValue, err error) {
+	value, err = f.PersistProvider.Load(tx, key)
 	if err != nil {
 		log.Error().Err(err).Msg("failed to load from persist")
 		return
 	}
 	// replay wals
-	err = c.WalProvider.CatchupWals(tx, key, value)
+	err = f.WalProvider.CatchupWals(tx, key, value)
 	if err != nil {
 		log.Error().Err(err).Msg("failed to catchup wals")
 		return
 	}
 
-	err = c.PersistProvider.Flush(tx, value)
+	err = f.PersistProvider.Flush(tx, value)
 	if err != nil {
 		return
 	}
@@ -239,23 +260,29 @@ func (f *InmemoryCache) FlushDirty(tx *gorm.DB) (err error) {
 			lock.Mu.Unlock()
 		}()
 
-		if lock.Value.GetDbVersion() != lock.Value.GetVersion() {
+		if lock.Value == nil {
+			log.Warn().Any("key", key).Msg("for some reason value is nil. maybe it is being initialized")
+			return true
+		}
+
+		if lock.Value.IsDirty() || lock.Value.GetDbVersion() != lock.Value.GetVersion() {
 			err = f.PersistProvider.Flush(tx, lock.Value)
 			if err != nil {
-				log.Error().Err(err).Msg("failed to flush back fiat quota")
+				log.Error().Err(err).Msg("failed to flush back")
 				return false
 			}
 			lock.Value.SetDbVersion(lock.Value.GetVersion())
+			lock.Value.SetDirty(false)
 
 			refreshCount++
 		}
 
 		return true
 	})
-	log.Info().Int("mapSize", total).Int("refreshCount", refreshCount).Msg("flushing back fiat quota")
+	log.Info().Int("mapSize", total).Int("refreshCount", refreshCount).Msg("flushing back")
 
-	if f.QuotaAccountCount != nil {
-		f.QuotaAccountCount.Set(float64(total))
+	if f.MetricsMapCount != nil {
+		f.MetricsMapCount.Set(float64(total))
 	}
 
 	return

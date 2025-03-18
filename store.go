@@ -2,6 +2,7 @@ package walock
 
 import (
 	"context"
+	"fmt"
 	"github.com/latifrons/walock/model"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/rs/zerolog/log"
@@ -25,7 +26,7 @@ import (
 //　　悬挂就是对于一个分布式事务，Try接口执行时，其二阶段 Cancel 接口已经在之前执行。Try方法需要识别出这是一个悬挂操作，然后直接返回失败。
 
 type WalockStore struct {
-	QuotaDbRw     *gorm.DB
+	DbRw          *gorm.DB
 	CacheProvider CacheProvider
 	TccProvider   TccProvider
 	MetricsName   string
@@ -37,7 +38,7 @@ func (w *WalockStore) Keys() (keys []model.LockerKey) {
 }
 
 func (w *WalockStore) Get(ctx context.Context, key model.LockerKey) (value model.LockerValue, err error) {
-	valuePointer, err := w.CacheProvider.LoadAndLock(ctx, w.QuotaDbRw, key)
+	valuePointer, err := w.CacheProvider.LoadAndLock(ctx, w.DbRw, key)
 	if err != nil {
 		return
 	}
@@ -53,7 +54,7 @@ func (w *WalockStore) Get(ctx context.Context, key model.LockerKey) (value model
 }
 
 func (w *WalockStore) Must(ctx context.Context, tccContext *model.TccContext, lockKey model.LockerKey, mustBody interface{}) (tccCode model.TccCode, code string, message string, err error) {
-	value, err := w.CacheProvider.LoadAndLock(ctx, w.QuotaDbRw, lockKey)
+	value, err := w.CacheProvider.LoadAndLock(ctx, w.DbRw, lockKey)
 	if err != nil {
 		return
 	}
@@ -64,7 +65,7 @@ func (w *WalockStore) Must(ctx context.Context, tccContext *model.TccContext, lo
 		w.CacheProvider.Unlock(lockKey)
 	}()
 
-	err = w.QuotaDbRw.Transaction(func(tx *gorm.DB) error {
+	err = w.DbRw.Transaction(func(tx *gorm.DB) error {
 		var callIt bool
 		callIt, err = w.TccProvider.BarrierMust(tccContext, tx)
 		if err != nil {
@@ -91,7 +92,7 @@ func (w *WalockStore) Must(ctx context.Context, tccContext *model.TccContext, lo
 }
 
 func (w *WalockStore) Try(ctx context.Context, tccContext *model.TccContext, lockKey model.LockerKey, tryBody interface{}) (tccCode model.TccCode, code string, message string, err error) {
-	value, err := w.CacheProvider.LoadAndLock(ctx, w.QuotaDbRw, lockKey)
+	value, err := w.CacheProvider.LoadAndLock(ctx, w.DbRw, lockKey)
 	if err != nil {
 		return
 	}
@@ -102,7 +103,7 @@ func (w *WalockStore) Try(ctx context.Context, tccContext *model.TccContext, loc
 		w.CacheProvider.Unlock(lockKey)
 	}()
 
-	err = w.QuotaDbRw.Transaction(func(tx *gorm.DB) error {
+	err = w.DbRw.Transaction(func(tx *gorm.DB) error {
 		var callIt bool
 		callIt, err = w.TccProvider.BarrierTry(tccContext, tx)
 		if err != nil {
@@ -118,6 +119,10 @@ func (w *WalockStore) Try(ctx context.Context, tccContext *model.TccContext, loc
 		if err != nil {
 			return err
 		}
+		if tccCode != model.TccCode_Success {
+			err = fmt.Errorf("try failed: code %s, msg %s", code, message)
+			return err
+		}
 		return nil
 	})
 	if err != nil {
@@ -128,7 +133,7 @@ func (w *WalockStore) Try(ctx context.Context, tccContext *model.TccContext, loc
 }
 
 func (w *WalockStore) Confirm(ctx context.Context, tccContext *model.TccContext, lockKey model.LockerKey, confirmBody interface{}) (tccCode model.TccCode, code string, message string, err error) {
-	err = w.QuotaDbRw.Transaction(func(tx *gorm.DB) error {
+	err = w.DbRw.Transaction(func(tx *gorm.DB) error {
 		var callIt bool
 		callIt, err = w.TccProvider.BarrierConfirm(tccContext, tx)
 		if err != nil {
@@ -144,6 +149,10 @@ func (w *WalockStore) Confirm(ctx context.Context, tccContext *model.TccContext,
 		if err != nil {
 			return err
 		}
+		if tccCode != model.TccCode_Success {
+			err = fmt.Errorf("confirm failed: code %s, msg %s", code, message)
+			return err
+		}
 		return nil
 	})
 	if err != nil {
@@ -154,7 +163,7 @@ func (w *WalockStore) Confirm(ctx context.Context, tccContext *model.TccContext,
 }
 
 func (w *WalockStore) Cancel(ctx context.Context, tccContext *model.TccContext, lockKey model.LockerKey, cancelBody interface{}) (tccCode model.TccCode, code string, message string, err error) {
-	value, err := w.CacheProvider.LoadAndLock(ctx, w.QuotaDbRw, lockKey)
+	value, err := w.CacheProvider.LoadAndLock(ctx, w.DbRw, lockKey)
 	if err != nil {
 		return
 	}
@@ -165,7 +174,7 @@ func (w *WalockStore) Cancel(ctx context.Context, tccContext *model.TccContext, 
 		w.CacheProvider.Unlock(lockKey)
 	}()
 
-	err = w.QuotaDbRw.Transaction(func(tx *gorm.DB) error {
+	err = w.DbRw.Transaction(func(tx *gorm.DB) error {
 		var callIt bool
 		callIt, err = w.TccProvider.BarrierCancel(tccContext, tx)
 		if err != nil {
@@ -181,6 +190,11 @@ func (w *WalockStore) Cancel(ctx context.Context, tccContext *model.TccContext, 
 		if err != nil {
 			return err
 		}
+		if tccCode != model.TccCode_Success {
+			err = fmt.Errorf("cancel failed: code %s, msg %s", code, message)
+			return err
+		}
+
 		return nil
 	})
 	if err != nil {
@@ -192,7 +206,7 @@ func (w *WalockStore) Cancel(ctx context.Context, tccContext *model.TccContext, 
 
 func (w *WalockStore) Update(ctx context.Context, lockKey model.LockerKey, updatedValue model.LockerValue,
 	updater func(baseV, updateV model.LockerValue) (updated bool)) (err error) {
-	baseValue, err := w.CacheProvider.LoadAndLock(ctx, w.QuotaDbRw, lockKey)
+	baseValue, err := w.CacheProvider.LoadAndLock(ctx, w.DbRw, lockKey)
 	if err != nil {
 		return
 	}
@@ -209,5 +223,9 @@ func (w *WalockStore) Update(ctx context.Context, lockKey model.LockerKey, updat
 }
 
 func (w *WalockStore) FlushDirty() (err error) {
-	return w.CacheProvider.FlushDirty(w.QuotaDbRw)
+	return w.CacheProvider.FlushDirty(w.DbRw)
+}
+
+func (w *WalockStore) Traverse(f func(key model.LockerKey, value model.LockerValue) bool) {
+	w.CacheProvider.Traverse(f)
 }
