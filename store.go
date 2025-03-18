@@ -65,6 +65,8 @@ func (w *WalockStore) Must(ctx context.Context, tccContext *model.TccContext, lo
 		w.CacheProvider.Unlock(lockKey)
 	}()
 
+	exemptError := false // just to revert the transaction. do not return this error to caller
+
 	err = w.DbRw.Transaction(func(tx *gorm.DB) error {
 		var callIt bool
 		callIt, err = w.TccProvider.BarrierMust(tccContext, tx)
@@ -81,10 +83,21 @@ func (w *WalockStore) Must(ctx context.Context, tccContext *model.TccContext, lo
 		if err != nil {
 			return err
 		}
+		if tccCode != model.TccCode_Success {
+			err = fmt.Errorf("must failed: code %s, msg %s", code, message)
+			exemptError = true
+			return err
+		}
+
 		return nil
 	})
 	if err != nil {
 		log.Debug().Str("gid", tccContext.GlobalId).Str("bid", tccContext.BranchId).Err(err).Msg("tx reverted Must")
+		if exemptError {
+			// do not return this error to caller
+			// this is just to revert the transaction
+			err = nil
+		}
 		return
 	}
 	return
@@ -102,6 +115,8 @@ func (w *WalockStore) Try(ctx context.Context, tccContext *model.TccContext, loc
 		w.LockHoldTime.WithLabelValues(w.MetricsName + "_try").Observe(time.Now().Sub(startTime).Seconds())
 		w.CacheProvider.Unlock(lockKey)
 	}()
+
+	exemptError := false // just to revert the transaction. do not return this error to caller
 
 	err = w.DbRw.Transaction(func(tx *gorm.DB) error {
 		var callIt bool
@@ -121,18 +136,26 @@ func (w *WalockStore) Try(ctx context.Context, tccContext *model.TccContext, loc
 		}
 		if tccCode != model.TccCode_Success {
 			err = fmt.Errorf("try failed: code %s, msg %s", code, message)
+			exemptError = true
 			return err
 		}
 		return nil
 	})
 	if err != nil {
 		log.Debug().Str("gid", tccContext.GlobalId).Str("bid", tccContext.BranchId).Err(err).Msg("tx reverted Try")
+		if exemptError {
+			// do not return this error to caller
+			// this is just to revert the transaction
+			err = nil
+		}
 		return
 	}
 	return
 }
 
 func (w *WalockStore) Confirm(ctx context.Context, tccContext *model.TccContext, lockKey model.LockerKey, confirmBody interface{}) (tccCode model.TccCode, code string, message string, err error) {
+	exemptError := false // just to revert the transaction. do not return this error to caller
+
 	err = w.DbRw.Transaction(func(tx *gorm.DB) error {
 		var callIt bool
 		callIt, err = w.TccProvider.BarrierConfirm(tccContext, tx)
@@ -151,12 +174,18 @@ func (w *WalockStore) Confirm(ctx context.Context, tccContext *model.TccContext,
 		}
 		if tccCode != model.TccCode_Success {
 			err = fmt.Errorf("confirm failed: code %s, msg %s", code, message)
+			exemptError = true
 			return err
 		}
 		return nil
 	})
 	if err != nil {
 		log.Debug().Str("gid", tccContext.GlobalId).Str("bid", tccContext.BranchId).Err(err).Msg("tx reverted Confirm")
+		if exemptError {
+			// do not return this error to caller
+			// this is just to revert the transaction
+			err = nil
+		}
 		return
 	}
 	return
@@ -173,6 +202,8 @@ func (w *WalockStore) Cancel(ctx context.Context, tccContext *model.TccContext, 
 		w.LockHoldTime.WithLabelValues(w.MetricsName + "_cancel").Observe(time.Now().Sub(startTime).Seconds())
 		w.CacheProvider.Unlock(lockKey)
 	}()
+
+	exemptError := false // just to revert the transaction. do not return this error to caller
 
 	err = w.DbRw.Transaction(func(tx *gorm.DB) error {
 		var callIt bool
@@ -192,6 +223,7 @@ func (w *WalockStore) Cancel(ctx context.Context, tccContext *model.TccContext, 
 		}
 		if tccCode != model.TccCode_Success {
 			err = fmt.Errorf("cancel failed: code %s, msg %s", code, message)
+			exemptError = true
 			return err
 		}
 
@@ -199,6 +231,11 @@ func (w *WalockStore) Cancel(ctx context.Context, tccContext *model.TccContext, 
 	})
 	if err != nil {
 		log.Debug().Str("gid", tccContext.GlobalId).Str("bid", tccContext.BranchId).Err(err).Msg("tx reverted Cancel")
+		if exemptError {
+			// do not return this error to caller
+			// this is just to revert the transaction
+			err = nil
+		}
 		return
 	}
 	return
