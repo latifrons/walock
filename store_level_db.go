@@ -37,13 +37,11 @@ import (
 // 当需要WAL重放时，将会从本周期和上一个周期的数据库中分别进行重放。
 
 type WalockStoreLevelDb struct {
-	DbRw               *leveldb.DB
-	Metrics            *model.Metrics
-	BusinessProvider   BusinessProviderLevelDb
-	TccBarrierLevelDb  tcc.TccBarrierLevelDb
-	BarrierName        string
-	BarrierDbTableName string
-	WriteOption        *opt.WriteOptions
+	Metrics           *model.Metrics          // injected by outside to provide metrics inside
+	BusinessProvider  BusinessProviderLevelDb // injected by outside to provide business logic
+	TccBarrierLevelDb *tcc.TccBarrierLevelDb  // injected by outside to provide tcc barrier
+	BarrierName       string
+	WriteOption       *opt.WriteOptions
 
 	accounts sync.Map // string:*model.Locker
 }
@@ -61,8 +59,8 @@ func (f *WalockStoreLevelDb) ensureUserMiniLock(key model.LockerKey) *model.Lock
 	return account.(*model.Locker)
 }
 
-func (f *WalockStoreLevelDb) ensure(key model.LockerKey, tx *leveldb.DB) (value model.LockerValue, err error) {
-	value, err = f.BusinessProvider.LoadPersistedValue(tx, key)
+func (f *WalockStoreLevelDb) ensure(tx *leveldb.DB, key model.LockerKey) (value model.LockerValue, err error) {
+	value, err = f.BusinessProvider.LoadPersistedValue(key)
 	if err != nil {
 		log.Error().Err(err).Msg("failed to load from persist")
 		return
@@ -74,7 +72,7 @@ func (f *WalockStoreLevelDb) ensure(key model.LockerKey, tx *leveldb.DB) (value 
 		return
 	}
 
-	err = f.BusinessProvider.Flush(tx, value)
+	err = f.BusinessProvider.Flush(value)
 	if err != nil {
 		return
 	}
@@ -95,7 +93,7 @@ func (f *WalockStoreLevelDb) LoadAndLock(tx *leveldb.DB, key model.LockerKey) (l
 	defer func() {
 		if r := recover(); r != nil {
 			fmt.Println("stacktrace from panic: \n" + string(debug.Stack()))
-			log.Error().Err(r.(error)).Stack().Msg("panic recovered")
+			log.Error().Any("v", r).Msg("recovered from panic")
 			err = r.(error)
 			lock.Mu.Unlock()
 		} else if err != nil {
@@ -106,7 +104,7 @@ func (f *WalockStoreLevelDb) LoadAndLock(tx *leveldb.DB, key model.LockerKey) (l
 	if lock.Value == nil {
 		// load from database
 		var newValue model.LockerValue
-		newValue, err = f.ensure(key, tx)
+		newValue, err = f.ensure(tx, key)
 		if err != nil {
 			return
 		}
@@ -152,9 +150,9 @@ func (f *WalockStoreLevelDb) Keys() (keys []model.LockerKey) {
 	return keys
 }
 
-func (f *WalockStoreLevelDb) Get(key model.LockerKey) (value model.LockerValue, err error) {
+func (f *WalockStoreLevelDb) Get(tx *leveldb.DB, key model.LockerKey) (value model.LockerValue, err error) {
 
-	valuePointer, err := f.LoadAndLock(f.DbRw, key)
+	valuePointer, err := f.LoadAndLock(tx, key)
 	if err != nil {
 		return
 	}
@@ -169,8 +167,8 @@ func (f *WalockStoreLevelDb) Get(key model.LockerKey) (value model.LockerValue, 
 	return
 }
 
-func (f *WalockStoreLevelDb) Must(tccContext *model.TccContext, lockKey model.LockerKey, mustBody interface{}) (tccCode model.TccCode, code string, message string, err error) {
-	value, err := f.LoadAndLock(f.DbRw, lockKey)
+func (f *WalockStoreLevelDb) Must(tx *leveldb.DB, tccContext *model.TccContext, lockKey model.LockerKey, mustBody interface{}) (tccCode model.TccCode, code string, message string, err error) {
+	value, err := f.LoadAndLock(tx, lockKey)
 	if err != nil {
 		return
 	}
@@ -186,7 +184,7 @@ func (f *WalockStoreLevelDb) Must(tccContext *model.TccContext, lockKey model.Lo
 	// check TCC
 	{
 		var callIt bool
-		callIt, err = f.TccBarrierLevelDb.CheckBarrierMust([]byte(v.Key), f.DbRw)
+		callIt, err = f.TccBarrierLevelDb.CheckBarrierMust(tx, []byte(v.Key))
 		if err != nil {
 			return
 		}
@@ -198,7 +196,7 @@ func (f *WalockStoreLevelDb) Must(tccContext *model.TccContext, lockKey model.Lo
 	}
 
 	// generate wal
-	var mustWal []byte
+	var mustWal model.Wal
 	{
 		var ok bool
 		ok, code, message, mustWal, err = f.BusinessProvider.GenerateWalMust(tccContext, lockKey, value, mustBody)
@@ -216,11 +214,11 @@ func (f *WalockStoreLevelDb) Must(tccContext *model.TccContext, lockKey model.Lo
 		b := &leveldb.Batch{}
 		b.Put([]byte(v.Key), []byte{})
 
-		waliKey := fmt.Sprintf("wali_%s_%d", lockKey, value.GetVersion()+1)
-		b.Put([]byte(waliKey), mustWal)
+		b.Put([]byte(mustWal.Key), mustWal.WalBytes)
+		fmt.Println("Must", mustWal.String())
 
 		// write wal first
-		err = f.DbRw.Write(b, f.WriteOption)
+		err = tx.Write(b, f.WriteOption)
 		if err != nil {
 			log.Error().Err(err).Str("tcc", tccContext.String()).Msg("failed to write wal")
 			return
@@ -228,14 +226,14 @@ func (f *WalockStoreLevelDb) Must(tccContext *model.TccContext, lockKey model.Lo
 	}
 
 	// update memory. this must success, or we will have a dirty wal
-	f.BusinessProvider.MustApplyWal(value, []WalBytes{mustWal})
+	f.BusinessProvider.MustApplyWal(value, []model.Wal{mustWal})
 	tccCode = consts.TccCode_Success
 	return
 
 }
 
-func (f *WalockStoreLevelDb) Try(tccContext *model.TccContext, lockKey model.LockerKey, tryBody interface{}) (tccCode model.TccCode, code string, message string, err error) {
-	value, err := f.LoadAndLock(f.DbRw, lockKey)
+func (f *WalockStoreLevelDb) Try(tx *leveldb.DB, tccContext *model.TccContext, lockKey model.LockerKey, tryBody interface{}) (tccCode model.TccCode, code string, message string, reservationId string, err error) {
+	value, err := f.LoadAndLock(tx, lockKey)
 	if err != nil {
 		return
 	}
@@ -251,7 +249,7 @@ func (f *WalockStoreLevelDb) Try(tccContext *model.TccContext, lockKey model.Loc
 	// check TCC
 	{
 		var callIt bool
-		callIt, err = f.TccBarrierLevelDb.CheckBarrierTry([]byte(v.Key), f.DbRw)
+		callIt, err = f.TccBarrierLevelDb.CheckBarrierTry(tx, []byte(v.Key))
 		if err != nil {
 			return
 		}
@@ -263,7 +261,7 @@ func (f *WalockStoreLevelDb) Try(tccContext *model.TccContext, lockKey model.Loc
 	}
 
 	// generate wal
-	var tryWal []byte
+	var tryWal model.Wal
 	{
 		var ok bool
 		ok, code, message, tryWal, err = f.BusinessProvider.GenerateWalTry(tccContext, lockKey, value, tryBody)
@@ -279,13 +277,13 @@ func (f *WalockStoreLevelDb) Try(tccContext *model.TccContext, lockKey model.Loc
 	// write tcc and mustWali in one transaction
 	{
 		b := &leveldb.Batch{}
-		b.Put([]byte(v.Key), []byte{})
+		b.Put([]byte(v.Key), []byte{}) // tcc
 
-		waliKey := fmt.Sprintf("wali_%s_%d", lockKey, value.GetVersion()+1)
-		b.Put([]byte(waliKey), tryWal)
+		b.Put([]byte(tryWal.Key), tryWal.WalBytes)
+		fmt.Println("Try", tryWal.String())
 
 		// write wal first
-		err = f.DbRw.Write(b, f.WriteOption)
+		err = tx.Write(b, f.WriteOption)
 		if err != nil {
 			log.Error().Err(err).Str("tcc", tccContext.String()).Msg("failed to write wal")
 			return
@@ -293,15 +291,16 @@ func (f *WalockStoreLevelDb) Try(tccContext *model.TccContext, lockKey model.Loc
 	}
 
 	// update memory. this must success, or we will have a dirty wal
-	f.BusinessProvider.MustApplyWal(value, []WalBytes{tryWal})
+	f.BusinessProvider.MustApplyWal(value, []model.Wal{tryWal})
 	tccCode = consts.TccCode_Success
+	reservationId = tryWal.Key
 
 	return
 }
 
-func (f *WalockStoreLevelDb) Confirm(tccContext *model.TccContext, lockKey model.LockerKey, confirmBody interface{}) (tccCode model.TccCode, code string, message string, err error) {
+func (f *WalockStoreLevelDb) Confirm(tx *leveldb.DB, tccContext *model.TccContext, lockKey model.LockerKey, reservationId string, confirmBody interface{}) (tccCode model.TccCode, code string, message string, err error) {
 
-	value, err := f.LoadAndLock(f.DbRw, lockKey)
+	value, err := f.LoadAndLock(tx, lockKey)
 	if err != nil {
 		return
 	}
@@ -317,7 +316,7 @@ func (f *WalockStoreLevelDb) Confirm(tccContext *model.TccContext, lockKey model
 	// check TCC
 	{
 		var callIt bool
-		callIt, err = f.TccBarrierLevelDb.CheckBarrierConfirm([]byte(v.Key), f.DbRw)
+		callIt, err = f.TccBarrierLevelDb.CheckBarrierConfirm(tx, []byte(v.Key))
 		if err != nil {
 			return
 		}
@@ -329,10 +328,10 @@ func (f *WalockStoreLevelDb) Confirm(tccContext *model.TccContext, lockKey model
 	}
 
 	// get reservationWal
-	var reservationWal WalBytes
+	var reservationWal model.Wal
 	{
 		var ok bool
-		reservationWal, ok, code, message, err = f.BusinessProvider.LoadReservation(f.DbRw, tccContext)
+		reservationWal, ok, code, message, err = f.BusinessProvider.LoadReservation(tx, reservationId)
 		if err != nil {
 			return
 		}
@@ -343,34 +342,33 @@ func (f *WalockStoreLevelDb) Confirm(tccContext *model.TccContext, lockKey model
 	}
 
 	// generate wal
-	var confirmWal []byte
+	var confirmWal model.Wal
 	{
 		confirmWal = f.BusinessProvider.GenerateWalConfirm(tccContext, lockKey, value, reservationWal)
 	}
 	// write tcc and mustWal in one transaction
-	{
+	if confirmWal.Key != "" {
 		b := &leveldb.Batch{}
 		b.Put([]byte(v.Key), []byte{})
-
-		waliKey := fmt.Sprintf("wali_%s_%d", lockKey, value.GetVersion()+1)
-		b.Put([]byte(waliKey), confirmWal)
+		b.Put([]byte(confirmWal.Key), confirmWal.WalBytes)
+		fmt.Println("Confirm", confirmWal.String())
 
 		// write wal first
-		err = f.DbRw.Write(b, f.WriteOption)
+		err = tx.Write(b, f.WriteOption)
 		if err != nil {
 			log.Error().Err(err).Str("tcc", tccContext.String()).Msg("failed to write wal")
 			return
 		}
+		// update memory. this must success, or we will have a dirty wal
+		f.BusinessProvider.MustApplyWal(value, []model.Wal{confirmWal})
 	}
 
-	// update memory. this must success, or we will have a dirty wal
-	f.BusinessProvider.MustApplyWal(value, []WalBytes{confirmWal})
 	tccCode = consts.TccCode_Success
 	return
 }
 
-func (f *WalockStoreLevelDb) Cancel(tccContext *model.TccContext, lockKey model.LockerKey, cancelBody interface{}) (tccCode model.TccCode, code string, message string, err error) {
-	value, err := f.LoadAndLock(f.DbRw, lockKey)
+func (f *WalockStoreLevelDb) Cancel(tx *leveldb.DB, tccContext *model.TccContext, lockKey model.LockerKey, reservationId string, cancelBody interface{}) (tccCode model.TccCode, code string, message string, err error) {
+	value, err := f.LoadAndLock(tx, lockKey)
 	if err != nil {
 		return
 	}
@@ -387,7 +385,7 @@ func (f *WalockStoreLevelDb) Cancel(tccContext *model.TccContext, lockKey model.
 	// check TCC
 	{
 		var callIt bool
-		callIt, err = f.TccBarrierLevelDb.CheckBarrierCancel([]byte(vTry.Key), []byte(vCancel.Key), f.DbRw)
+		callIt, err = f.TccBarrierLevelDb.CheckBarrierCancel(tx, []byte(vTry.Key), []byte(vCancel.Key))
 		if err != nil {
 			return
 		}
@@ -398,10 +396,10 @@ func (f *WalockStoreLevelDb) Cancel(tccContext *model.TccContext, lockKey model.
 		}
 	}
 	// get reservationWal
-	var reservationWal WalBytes
+	var reservationWal model.Wal
 	{
 		var ok bool
-		reservationWal, ok, code, message, err = f.BusinessProvider.LoadReservation(f.DbRw, tccContext)
+		reservationWal, ok, code, message, err = f.BusinessProvider.LoadReservation(tx, reservationId)
 		if err != nil {
 			return
 		}
@@ -411,7 +409,7 @@ func (f *WalockStoreLevelDb) Cancel(tccContext *model.TccContext, lockKey model.
 		}
 	}
 	// generate wal
-	var cancelWal []byte
+	var cancelWal model.Wal
 	{
 		cancelWal = f.BusinessProvider.GenerateWalCancel(tccContext, lockKey, value, reservationWal)
 	}
@@ -420,11 +418,11 @@ func (f *WalockStoreLevelDb) Cancel(tccContext *model.TccContext, lockKey model.
 		b := &leveldb.Batch{}
 		b.Put([]byte(vCancel.Key), []byte{})
 
-		waliKey := fmt.Sprintf("wali_%s_%d", lockKey, value.GetVersion()+1)
-		b.Put([]byte(waliKey), cancelWal)
+		b.Put([]byte(cancelWal.Key), cancelWal.WalBytes)
+		fmt.Println("Cancel", cancelWal.String())
 
 		// write wal first
-		err = f.DbRw.Write(b, f.WriteOption)
+		err = tx.Write(b, f.WriteOption)
 		if err != nil {
 			log.Error().Err(err).Str("tcc", tccContext.String()).Msg("failed to write wal")
 			return
@@ -433,9 +431,9 @@ func (f *WalockStoreLevelDb) Cancel(tccContext *model.TccContext, lockKey model.
 	return
 }
 
-func (f *WalockStoreLevelDb) Update(lockKey model.LockerKey, updatedValue model.LockerValue,
+func (f *WalockStoreLevelDb) Update(tx *leveldb.DB, lockKey model.LockerKey, updatedValue model.LockerValue,
 	updater func(baseV, updateV model.LockerValue) (updated bool)) (err error) {
-	baseValue, err := f.LoadAndLock(f.DbRw, lockKey)
+	baseValue, err := f.LoadAndLock(tx, lockKey)
 	if err != nil {
 		return
 	}
@@ -471,7 +469,7 @@ func (f *WalockStoreLevelDb) FlushDirty() (err error) {
 		}
 
 		if lock.Value.IsDirty() || lock.Value.GetDbVersion() != lock.Value.GetVersion() {
-			err = f.BusinessProvider.Flush(f.DbRw, lock.Value)
+			err = f.BusinessProvider.Flush(lock.Value)
 			if err != nil {
 				log.Error().Err(err).Msg("failed to flush back")
 				return false

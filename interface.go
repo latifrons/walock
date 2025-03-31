@@ -36,22 +36,20 @@ type BusinessProviderSql interface {
 	Flush(tx *gorm.DB, value model.LockerValue) error
 }
 
-type WalBytes []byte
-
 type BusinessProviderLevelDb interface {
-	LoadPersistedValue(tx *leveldb.DB, key model.LockerKey) (v model.LockerValue, err error)
-	GenerateWalTry(tccContext *model.TccContext, key model.LockerKey, value model.LockerValue, tryBody interface{}) (ok bool, code string, message string, tryWali WalBytes, err error)
-	GenerateWalConfirm(tccContext *model.TccContext, key model.LockerKey, value model.LockerValue, reservationWali WalBytes) (confirmWali WalBytes)
-	GenerateWalCancel(tccContext *model.TccContext, key model.LockerKey, value model.LockerValue, reservationWali WalBytes) (revertWali WalBytes)
-	GenerateWalMust(tccContext *model.TccContext, key model.LockerKey, value model.LockerValue, mustBody interface{}) (ok bool, code string, message string, mustWali WalBytes, err error)
-	LoadReservation(tx *leveldb.DB, tccContext *model.TccContext) (wal WalBytes, ok bool, code string, message string, err error)
+	LoadPersistedValue(key model.LockerKey) (v model.LockerValue, err error)
+	GenerateWalTry(tccContext *model.TccContext, key model.LockerKey, value model.LockerValue, tryBody interface{}) (ok bool, code string, message string, tryWali model.Wal, err error)
+	GenerateWalConfirm(tccContext *model.TccContext, key model.LockerKey, value model.LockerValue, reservationWali model.Wal) (confirmWali model.Wal)
+	GenerateWalCancel(tccContext *model.TccContext, key model.LockerKey, value model.LockerValue, reservationWali model.Wal) (revertWali model.Wal)
+	GenerateWalMust(tccContext *model.TccContext, key model.LockerKey, value model.LockerValue, mustBody interface{}) (ok bool, code string, message string, mustWali model.Wal, err error)
+	LoadReservation(tx *leveldb.DB, reservationId string) (wali model.Wal, ok bool, code string, message string, err error)
 	CatchupWals(tx *leveldb.DB, key model.LockerKey, load model.LockerValue) (err error)
-	MustApplyWal(load model.LockerValue, walis []WalBytes)
-	FlushWal(tx *leveldb.DB, wali WalBytes) error
+	MustApplyWal(load model.LockerValue, walis []model.Wal)
+	FlushWal(tx *leveldb.DB, wali model.Wal) error
 	FlushDirty(tx *gorm.DB) (err error)
 	Traverse(func(key model.LockerKey, value model.LockerValue) bool)
 	Keys() []model.LockerKey
-	Flush(tx *leveldb.DB, value model.LockerValue) error
+	Flush(value model.LockerValue) error
 }
 
 //

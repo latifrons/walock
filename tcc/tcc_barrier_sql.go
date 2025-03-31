@@ -36,7 +36,7 @@ func (f *TccBarrierSql) BarrierTry(tccHeader *model.TccContext, persistentContex
 	pbtx := persistentContext.(*gorm.DB)
 
 	// 如果是Try分支，则那么insert ignore插入gid-branchid-try，如果成功插入，则调用屏障内逻辑
-	v := buildTccBarrierReceiver(f.BarrierName, tccHeader.GlobalId, tccHeader.BranchId, consts.TccBranchTypeTry)
+	v := BuildTccBarrierReceiver(f.BarrierName, tccHeader.GlobalId, tccHeader.BranchId, consts.TccBranchTypeTry)
 	result := pbtx.Clauses(clause.Insert{Modifier: "IGNORE"}).Table(f.DbTableName).Create(&v)
 
 	if result.Error != nil {
@@ -55,7 +55,7 @@ func (f *TccBarrierSql) BarrierConfirm(tccHeader *model.TccContext, persistentCo
 	pbtx := persistentContext.(*gorm.DB)
 
 	// 如果是Confirm分支，那么insert ignore插入gid-branchid-confirm，如果成功插入，则调用屏障内逻辑
-	v := buildTccBarrierReceiver(f.BarrierName, tccHeader.GlobalId, tccHeader.BranchId, consts.TccBranchTypeConfirm)
+	v := BuildTccBarrierReceiver(f.BarrierName, tccHeader.GlobalId, tccHeader.BranchId, consts.TccBranchTypeConfirm)
 	result := pbtx.Clauses(clause.Insert{Modifier: "IGNORE"}).Table(f.DbTableName).Create(&v)
 
 	if result.Error != nil {
@@ -73,7 +73,7 @@ func (f *TccBarrierSql) BarrierCancel(tccHeader *model.TccContext, persistentCon
 	pbtx := persistentContext.(*gorm.DB)
 
 	// 如果是Cancel分支，那么insert ignore插入gid-branchid-try，再插入gid-branchid-cancel，如果try未插入并且cancel插入成功，则调用屏障内逻辑
-	v := buildTccBarrierReceiver(f.BarrierName, tccHeader.GlobalId, tccHeader.BranchId, consts.TccBranchTypeTry)
+	v := BuildTccBarrierReceiver(f.BarrierName, tccHeader.GlobalId, tccHeader.BranchId, consts.TccBranchTypeTry)
 	result := pbtx.Clauses(clause.Insert{Modifier: "IGNORE"}).Table(f.DbTableName).Create(&v)
 
 	if result.Error != nil {
@@ -85,7 +85,7 @@ func (f *TccBarrierSql) BarrierCancel(tccHeader *model.TccContext, persistentCon
 	}
 
 	// check if the branch is cancelled
-	v = buildTccBarrierReceiver(f.BarrierName, tccHeader.GlobalId, tccHeader.BranchId, consts.TccBranchTypeCancel)
+	v = BuildTccBarrierReceiver(f.BarrierName, tccHeader.GlobalId, tccHeader.BranchId, consts.TccBranchTypeCancel)
 	result = pbtx.Clauses(clause.Insert{Modifier: "IGNORE"}).Table(f.DbTableName).Create(&v)
 
 	if result.Error != nil {

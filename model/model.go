@@ -1,6 +1,7 @@
 package model
 
 import (
+	"fmt"
 	"github.com/prometheus/client_golang/prometheus"
 	"sync"
 	"time"
@@ -41,4 +42,15 @@ type TccCode int32
 type TccBarrierReceiver struct {
 	Key  string    `gorm:"size:100;primarykey"`
 	Time time.Time `gorm:"index"`
+}
+
+type WalBytes []byte
+
+type Wal struct {
+	Key      string
+	WalBytes WalBytes
+}
+
+func (w *Wal) String() string {
+	return fmt.Sprintf("WAL K: %s, V: %s", w.Key, string(w.WalBytes))
 }
