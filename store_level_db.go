@@ -109,7 +109,7 @@ func (f *WalockStoreLevelDb) LoadAndLock(tx *leveldb.DB, key model.LockerKey) (l
 			return
 		}
 		lock.Value = newValue
-		log.Debug().Str("key", string(key)).Msg("persist loaded")
+		log.Debug().Str("key", string(key)).Msg("loaded value from persist store")
 	}
 	lockValue = lock.Value
 	return
@@ -215,7 +215,7 @@ func (f *WalockStoreLevelDb) Must(tx *leveldb.DB, tccContext *model.TccContext, 
 		b.Put([]byte(v.Key), []byte{})
 
 		b.Put([]byte(mustWal.Key), mustWal.WalBytes)
-		fmt.Println("Must", mustWal.String())
+		//fmt.Println("PUT Must", mustWal.String())
 
 		// write wal first
 		err = tx.Write(b, f.WriteOption)
@@ -280,7 +280,7 @@ func (f *WalockStoreLevelDb) Try(tx *leveldb.DB, tccContext *model.TccContext, l
 		b.Put([]byte(v.Key), []byte{}) // tcc
 
 		b.Put([]byte(tryWal.Key), tryWal.WalBytes)
-		fmt.Println("Try", tryWal.String())
+		//fmt.Println("PUT Try", tryWal.String())
 
 		// write wal first
 		err = tx.Write(b, f.WriteOption)
@@ -351,7 +351,7 @@ func (f *WalockStoreLevelDb) Confirm(tx *leveldb.DB, tccContext *model.TccContex
 		b := &leveldb.Batch{}
 		b.Put([]byte(v.Key), []byte{})
 		b.Put([]byte(confirmWal.Key), confirmWal.WalBytes)
-		fmt.Println("Confirm", confirmWal.String())
+		//fmt.Println("PUT Confirm", confirmWal.String())
 
 		// write wal first
 		err = tx.Write(b, f.WriteOption)
@@ -419,7 +419,7 @@ func (f *WalockStoreLevelDb) Cancel(tx *leveldb.DB, tccContext *model.TccContext
 		b.Put([]byte(vCancel.Key), []byte{})
 
 		b.Put([]byte(cancelWal.Key), cancelWal.WalBytes)
-		fmt.Println("Cancel", cancelWal.String())
+		//fmt.Println("PUT Cancel", cancelWal.String())
 
 		// write wal first
 		err = tx.Write(b, f.WriteOption)
@@ -428,6 +428,9 @@ func (f *WalockStoreLevelDb) Cancel(tx *leveldb.DB, tccContext *model.TccContext
 			return
 		}
 	}
+	f.BusinessProvider.MustApplyWal(value, []model.Wal{cancelWal})
+	tccCode = consts.TccCode_Success
+
 	return
 }
 
