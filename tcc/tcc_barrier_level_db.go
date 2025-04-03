@@ -2,15 +2,15 @@ package tcc
 
 import (
 	"errors"
+	"github.com/latifrons/walock/model"
 	"github.com/rs/zerolog/log"
 	"github.com/syndtr/goleveldb/leveldb"
 )
 
 type TccBarrierLevelDb struct {
-	DbTableName string
 }
 
-func (f *TccBarrierLevelDb) CheckBarrierMust(tx *leveldb.DB, mustKey []byte) (callIt bool, err error) {
+func (f *TccBarrierLevelDb) CheckBarrierMust(tx model.LevelDbStoreOperator, mustKey []byte) (callIt bool, err error) {
 	// 如果是Try分支，则那么insert ignore插入gid-branchid-try，如果成功插入，则调用屏障内逻辑
 	set, _, err := CheckNX(tx, mustKey)
 	if err != nil {
@@ -20,7 +20,7 @@ func (f *TccBarrierLevelDb) CheckBarrierMust(tx *leveldb.DB, mustKey []byte) (ca
 	return
 }
 
-func (f *TccBarrierLevelDb) CheckBarrierTry(tx *leveldb.DB, tryKey []byte) (callIt bool, err error) {
+func (f *TccBarrierLevelDb) CheckBarrierTry(tx model.LevelDbStoreOperator, tryKey []byte) (callIt bool, err error) {
 	// 如果是Try分支，则那么insert ignore插入gid-branchid-try，如果成功插入，则调用屏障内逻辑
 	set, _, err := CheckNX(tx, tryKey)
 	if err != nil {
@@ -29,7 +29,7 @@ func (f *TccBarrierLevelDb) CheckBarrierTry(tx *leveldb.DB, tryKey []byte) (call
 	callIt = set
 	return
 }
-func (f *TccBarrierLevelDb) CheckBarrierConfirm(tx *leveldb.DB, confirmKey []byte) (callIt bool, err error) {
+func (f *TccBarrierLevelDb) CheckBarrierConfirm(tx model.LevelDbStoreOperator, confirmKey []byte) (callIt bool, err error) {
 	// 如果是Confirm分支，那么insert ignore插入gid-branchid-confirm，如果成功插入，则调用屏障内逻辑
 	set, _, err := CheckNX(tx, confirmKey)
 	if err != nil {
@@ -39,7 +39,7 @@ func (f *TccBarrierLevelDb) CheckBarrierConfirm(tx *leveldb.DB, confirmKey []byt
 	return
 }
 
-func (f *TccBarrierLevelDb) CheckBarrierCancel(tx *leveldb.DB, tryKey []byte, cancelKey []byte) (callIt bool, err error) {
+func (f *TccBarrierLevelDb) CheckBarrierCancel(tx model.LevelDbStoreOperator, tryKey []byte, cancelKey []byte) (callIt bool, err error) {
 	// 如果是Cancel分支，那么insert ignore插入gid-branchid-try，再插入gid-branchid-cancel，如果try未插入并且cancel插入成功，则调用屏障内逻辑
 	set, _, err := CheckNX(tx, tryKey)
 	if err != nil {
@@ -63,10 +63,10 @@ func (f *TccBarrierLevelDb) CheckBarrierCancel(tx *leveldb.DB, tryKey []byte, ca
 
 // CheckNX
 // It returns true if the key does not exist and false if it does exist
-func CheckNX(db *leveldb.DB, key []byte) (notExists bool, value []byte, err error) {
+func CheckNX(tx model.LevelDbStoreOperator, key []byte) (notExists bool, value []byte, err error) {
 	// Try to get the existing value
 	log.Debug()
-	value, err = db.Get(key, nil)
+	value, err = tx.Get(key, nil)
 	if err != nil {
 		if errors.Is(err, leveldb.ErrNotFound) {
 			// Key does not exist, set the new value
@@ -87,17 +87,17 @@ func CheckNX(db *leveldb.DB, key []byte) (notExists bool, value []byte, err erro
 
 // SetNX sets a key in the database if it does not exist
 // It returns true if the key was set, or false if it already existed
-func SetNX(db *leveldb.DB, key []byte, setValue []byte) (set bool, value []byte, err error) {
+func SetNX(tx model.LevelDbStoreOperator, key []byte, setValue []byte) (set bool, value []byte, err error) {
 	log.Debug().Str("key", string(key)).Msg("Get LevelDB")
 
 	// Try to get the existing value
-	value, err = db.Get(key, nil)
+	value, err = tx.Get(key, nil)
 	if err != nil {
 		if errors.Is(err, leveldb.ErrNotFound) {
 			// Key does not exist, set the new value
 			set = true
 			log.Debug().Str("key", string(key)).Msg("Put LevelDB")
-			err = db.Put(key, setValue, nil)
+			err = tx.Put(key, setValue, nil)
 			if err != nil {
 				return
 			}

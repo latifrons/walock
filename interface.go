@@ -2,7 +2,6 @@ package walock
 
 import (
 	"github.com/latifrons/walock/model"
-	"github.com/syndtr/goleveldb/leveldb"
 	"gorm.io/gorm"
 )
 
@@ -42,14 +41,12 @@ type BusinessProviderLevelDb interface {
 	GenerateWalConfirm(tccContext *model.TccContext, key model.LockerKey, value model.LockerValue, reservationWali model.Wal) (confirmWali model.Wal)
 	GenerateWalCancel(tccContext *model.TccContext, key model.LockerKey, value model.LockerValue, reservationWali model.Wal) (revertWali model.Wal)
 	GenerateWalMust(tccContext *model.TccContext, key model.LockerKey, value model.LockerValue, mustBody interface{}) (ok bool, code string, message string, mustWali model.Wal, err error)
-	LoadReservation(tx *leveldb.DB, reservationId string) (wali model.Wal, ok bool, code string, message string, err error)
-	CatchupWals(tx *leveldb.DB, key model.LockerKey, load model.LockerValue) (err error)
+	CatchupWals(tx model.LevelDbStoreOperator, key model.LockerKey, load model.LockerValue) (updated bool, err error)
 	MustApplyWal(load model.LockerValue, walis []model.Wal)
-	FlushWal(tx *leveldb.DB, wali model.Wal) error
-	FlushDirty(tx *gorm.DB) (err error)
+	FlushWal(tx model.LevelDbStoreOperator, wali model.Wal) error
 	Traverse(func(key model.LockerKey, value model.LockerValue) bool)
 	Keys() []model.LockerKey
-	Flush(value model.LockerValue) error
+	PersistValue(value model.LockerValue) error
 }
 
 //
@@ -61,7 +58,7 @@ type BusinessProviderLevelDb interface {
 
 //type PersistProvider interface {
 //	Load(tx *gorm.DB, key model.LockerKey) (value model.LockerValue, err error)
-//	Flush(tx *gorm.DB, value model.LockerValue) (err error)
+//	PersistValue(tx *gorm.DB, value model.LockerValue) (err error)
 //}
 
 //type TccProvider interface {

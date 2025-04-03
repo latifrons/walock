@@ -1,6 +1,7 @@
 package walock
 
 import (
+	"errors"
 	"fmt"
 	"github.com/latifrons/walock/consts"
 	"github.com/latifrons/walock/model"
@@ -59,28 +60,38 @@ func (f *WalockStoreLevelDb) ensureUserMiniLock(key model.LockerKey) *model.Lock
 	return account.(*model.Locker)
 }
 
-func (f *WalockStoreLevelDb) ensure(tx *leveldb.DB, key model.LockerKey) (value model.LockerValue, err error) {
+func (f *WalockStoreLevelDb) ensure(tx model.LevelDbStoreOperator, key model.LockerKey) (value model.LockerValue, err error) {
 	value, err = f.BusinessProvider.LoadPersistedValue(key)
 	if err != nil {
 		log.Error().Err(err).Msg("failed to load from persist")
 		return
 	}
+	var updated bool
 	// replay wals
-	err = f.BusinessProvider.CatchupWals(tx, key, value)
+	updated, err = f.BusinessProvider.CatchupWals(tx, key, value)
 	if err != nil {
 		log.Error().Err(err).Msg("failed to catchup wals")
 		return
 	}
 
-	err = f.BusinessProvider.Flush(value)
+	if updated {
+		err = f.BusinessProvider.PersistValue(value)
+		if err != nil {
+			return
+		}
+	}
+	value.SetDirty(false)
+	err = tx.MarkDirty([]byte(key), false, f.WriteOption)
 	if err != nil {
+		log.Error().Err(err).Str("key", string(key)).Msg("failed to clear dirty")
 		return
 	}
+
 	return
 
 }
 
-func (f *WalockStoreLevelDb) LoadAndLock(tx *leveldb.DB, key model.LockerKey) (lockValue model.LockerValue, err error) {
+func (f *WalockStoreLevelDb) LoadAndLock(tx model.LevelDbStoreOperator, key model.LockerKey) (lockValue model.LockerValue, err error) {
 	startTime := time.Now()
 	lock := f.ensureUserMiniLock(key)
 	lock.Mu.Lock()
@@ -150,7 +161,7 @@ func (f *WalockStoreLevelDb) Keys() (keys []model.LockerKey) {
 	return keys
 }
 
-func (f *WalockStoreLevelDb) Get(tx *leveldb.DB, key model.LockerKey) (value model.LockerValue, err error) {
+func (f *WalockStoreLevelDb) Get(tx model.LevelDbStoreOperator, key model.LockerKey) (value model.LockerValue, err error) {
 
 	valuePointer, err := f.LoadAndLock(tx, key)
 	if err != nil {
@@ -167,7 +178,7 @@ func (f *WalockStoreLevelDb) Get(tx *leveldb.DB, key model.LockerKey) (value mod
 	return
 }
 
-func (f *WalockStoreLevelDb) Must(tx *leveldb.DB, tccContext *model.TccContext, lockKey model.LockerKey, mustBody interface{}) (tccCode model.TccCode, code string, message string, err error) {
+func (f *WalockStoreLevelDb) Must(tx model.LevelDbStoreOperator, tccContext *model.TccContext, lockKey model.LockerKey, mustBody interface{}) (tccCode model.TccCode, code string, message string, err error) {
 	value, err := f.LoadAndLock(tx, lockKey)
 	if err != nil {
 		return
@@ -212,10 +223,17 @@ func (f *WalockStoreLevelDb) Must(tx *leveldb.DB, tccContext *model.TccContext, 
 	// write tcc and mustWal in one transaction
 	{
 		b := &leveldb.Batch{}
-		b.Put([]byte(v.Key), []byte{})
-
-		b.Put([]byte(mustWal.Key), mustWal.WalBytes)
+		b.Put([]byte(v.Key), []byte{})               // tcc barrier -> WAL key
+		b.Put([]byte(mustWal.Key), mustWal.WalBytes) // WAL key
 		//fmt.Println("PUT Must", mustWal.String())
+
+		if !value.IsDirty() {
+			err = tx.MarkDirty([]byte(lockKey), true, f.WriteOption)
+			if err != nil {
+				log.Error().Err(err).Str("tcc", tccContext.String()).Msg("failed to write dirty")
+				return
+			}
+		}
 
 		// write wal first
 		err = tx.Write(b, f.WriteOption)
@@ -226,13 +244,14 @@ func (f *WalockStoreLevelDb) Must(tx *leveldb.DB, tccContext *model.TccContext, 
 	}
 
 	// update memory. this must success, or we will have a dirty wal
+	value.SetDirty(true)
 	f.BusinessProvider.MustApplyWal(value, []model.Wal{mustWal})
 	tccCode = consts.TccCode_Success
 	return
 
 }
 
-func (f *WalockStoreLevelDb) Try(tx *leveldb.DB, tccContext *model.TccContext, lockKey model.LockerKey, tryBody interface{}) (tccCode model.TccCode, code string, message string, reservationId string, err error) {
+func (f *WalockStoreLevelDb) Try(tx model.LevelDbStoreOperator, tccContext *model.TccContext, lockKey model.LockerKey, tryBody interface{}) (tccCode model.TccCode, code string, message string, err error) {
 	value, err := f.LoadAndLock(tx, lockKey)
 	if err != nil {
 		return
@@ -259,6 +278,19 @@ func (f *WalockStoreLevelDb) Try(tx *leveldb.DB, tccContext *model.TccContext, l
 			return
 		}
 	}
+	//+-------------+-----------------------+-----------------------+
+	//|             | Try                   | Cancel                |
+	//+-------------+-----------------------+-----------------------+
+	//| lockKey     | DUM-001#BTC           | DUM-001#BTC           |
+	//+-------------+-----------------------+-----------------------+
+	//| tcc barrier | B-GlobalId-BranchId-T | B-GlobalId-BranchId-X |
+	//+-------------+-----------------------+-----------------------+
+	//| wal Key     | DUM-001#BTC-100       | DUM-001#BTC-101       |
+	//+-------------+-----------------------+-----------------------+
+
+	// Caller Use Tcc Barrier to revert
+	// I use Tcc Barrier to find Wal Key and then do the reverse Wal
+	// So there must be a mapping between Tcc Barrier and WAL Key
 
 	// generate wal
 	var tryWal model.Wal
@@ -277,10 +309,17 @@ func (f *WalockStoreLevelDb) Try(tx *leveldb.DB, tccContext *model.TccContext, l
 	// write tcc and mustWali in one transaction
 	{
 		b := &leveldb.Batch{}
-		b.Put([]byte(v.Key), []byte{}) // tcc
-
-		b.Put([]byte(tryWal.Key), tryWal.WalBytes)
+		b.Put([]byte(v.Key), []byte(tryWal.Key))   // tcc barrier -> WAL key
+		b.Put([]byte(tryWal.Key), tryWal.WalBytes) // WAL key
 		//fmt.Println("PUT Try", tryWal.String())
+
+		if !value.IsDirty() {
+			err = tx.MarkDirty([]byte(lockKey), true, f.WriteOption)
+			if err != nil {
+				log.Error().Err(err).Str("tcc", tccContext.String()).Msg("failed to write dirty")
+				return
+			}
+		}
 
 		// write wal first
 		err = tx.Write(b, f.WriteOption)
@@ -291,14 +330,14 @@ func (f *WalockStoreLevelDb) Try(tx *leveldb.DB, tccContext *model.TccContext, l
 	}
 
 	// update memory. this must success, or we will have a dirty wal
+	value.SetDirty(true)
 	f.BusinessProvider.MustApplyWal(value, []model.Wal{tryWal})
 	tccCode = consts.TccCode_Success
-	reservationId = tryWal.Key
 
 	return
 }
 
-func (f *WalockStoreLevelDb) Confirm(tx *leveldb.DB, tccContext *model.TccContext, lockKey model.LockerKey, reservationId string, confirmBody interface{}) (tccCode model.TccCode, code string, message string, err error) {
+func (f *WalockStoreLevelDb) Confirm(tx model.LevelDbStoreOperator, tccContext *model.TccContext, lockKey model.LockerKey, confirmBody interface{}) (tccCode model.TccCode, code string, message string, err error) {
 
 	value, err := f.LoadAndLock(tx, lockKey)
 	if err != nil {
@@ -311,6 +350,7 @@ func (f *WalockStoreLevelDb) Confirm(tx *leveldb.DB, tccContext *model.TccContex
 		f.Unlock(lockKey)
 	}()
 
+	vTry := tcc.BuildTccBarrierReceiver(f.BarrierName, tccContext.GlobalId, tccContext.BranchId, consts.TccBranchTypeTry)
 	v := tcc.BuildTccBarrierReceiver(f.BarrierName, tccContext.GlobalId, tccContext.BranchId, consts.TccBranchTypeConfirm)
 
 	// check TCC
@@ -331,7 +371,7 @@ func (f *WalockStoreLevelDb) Confirm(tx *leveldb.DB, tccContext *model.TccContex
 	var reservationWal model.Wal
 	{
 		var ok bool
-		reservationWal, ok, code, message, err = f.BusinessProvider.LoadReservation(tx, reservationId)
+		reservationWal, ok, code, message, err = f.LoadReservation(tx, vTry.Key)
 		if err != nil {
 			return
 		}
@@ -353,6 +393,14 @@ func (f *WalockStoreLevelDb) Confirm(tx *leveldb.DB, tccContext *model.TccContex
 		b.Put([]byte(confirmWal.Key), confirmWal.WalBytes)
 		//fmt.Println("PUT Confirm", confirmWal.String())
 
+		if !value.IsDirty() {
+			err = tx.MarkDirty([]byte(lockKey), true, f.WriteOption)
+			if err != nil {
+				log.Error().Err(err).Str("tcc", tccContext.String()).Msg("failed to write dirty")
+				return
+			}
+		}
+
 		// write wal first
 		err = tx.Write(b, f.WriteOption)
 		if err != nil {
@@ -360,6 +408,7 @@ func (f *WalockStoreLevelDb) Confirm(tx *leveldb.DB, tccContext *model.TccContex
 			return
 		}
 		// update memory. this must success, or we will have a dirty wal
+		value.SetDirty(true)
 		f.BusinessProvider.MustApplyWal(value, []model.Wal{confirmWal})
 	}
 
@@ -367,7 +416,7 @@ func (f *WalockStoreLevelDb) Confirm(tx *leveldb.DB, tccContext *model.TccContex
 	return
 }
 
-func (f *WalockStoreLevelDb) Cancel(tx *leveldb.DB, tccContext *model.TccContext, lockKey model.LockerKey, reservationId string, cancelBody interface{}) (tccCode model.TccCode, code string, message string, err error) {
+func (f *WalockStoreLevelDb) Cancel(tx model.LevelDbStoreOperator, tccContext *model.TccContext, lockKey model.LockerKey, cancelBody interface{}) (tccCode model.TccCode, code string, message string, err error) {
 	value, err := f.LoadAndLock(tx, lockKey)
 	if err != nil {
 		return
@@ -399,7 +448,7 @@ func (f *WalockStoreLevelDb) Cancel(tx *leveldb.DB, tccContext *model.TccContext
 	var reservationWal model.Wal
 	{
 		var ok bool
-		reservationWal, ok, code, message, err = f.BusinessProvider.LoadReservation(tx, reservationId)
+		reservationWal, ok, code, message, err = f.LoadReservation(tx, vTry.Key)
 		if err != nil {
 			return
 		}
@@ -416,10 +465,17 @@ func (f *WalockStoreLevelDb) Cancel(tx *leveldb.DB, tccContext *model.TccContext
 	// write tcc and mustWal in one transaction
 	{
 		b := &leveldb.Batch{}
-		b.Put([]byte(vCancel.Key), []byte{})
-
-		b.Put([]byte(cancelWal.Key), cancelWal.WalBytes)
+		b.Put([]byte(vCancel.Key), []byte{})             // tcc barrier -> WAL key
+		b.Put([]byte(cancelWal.Key), cancelWal.WalBytes) // WAL key
 		//fmt.Println("PUT Cancel", cancelWal.String())
+
+		if !value.IsDirty() {
+			err = tx.MarkDirty([]byte(lockKey), true, f.WriteOption)
+			if err != nil {
+				log.Error().Err(err).Str("tcc", tccContext.String()).Msg("failed to write dirty")
+				return
+			}
+		}
 
 		// write wal first
 		err = tx.Write(b, f.WriteOption)
@@ -428,13 +484,14 @@ func (f *WalockStoreLevelDb) Cancel(tx *leveldb.DB, tccContext *model.TccContext
 			return
 		}
 	}
+	value.SetDirty(true)
 	f.BusinessProvider.MustApplyWal(value, []model.Wal{cancelWal})
 	tccCode = consts.TccCode_Success
 
 	return
 }
 
-func (f *WalockStoreLevelDb) Update(tx *leveldb.DB, lockKey model.LockerKey, updatedValue model.LockerValue,
+func (f *WalockStoreLevelDb) Update(tx model.LevelDbStoreOperator, lockKey model.LockerKey, updatedValue model.LockerValue,
 	updater func(baseV, updateV model.LockerValue) (updated bool)) (err error) {
 	baseValue, err := f.LoadAndLock(tx, lockKey)
 	if err != nil {
@@ -452,7 +509,7 @@ func (f *WalockStoreLevelDb) Update(tx *leveldb.DB, lockKey model.LockerKey, upd
 	return
 }
 
-func (f *WalockStoreLevelDb) FlushDirty() (err error) {
+func (f *WalockStoreLevelDb) FlushDirty(tx model.LevelDbStoreOperator) (err error) {
 	refreshCount := 0
 
 	total := 0
@@ -472,13 +529,18 @@ func (f *WalockStoreLevelDb) FlushDirty() (err error) {
 		}
 
 		if lock.Value.IsDirty() || lock.Value.GetDbVersion() != lock.Value.GetVersion() {
-			err = f.BusinessProvider.Flush(lock.Value)
+			err = f.BusinessProvider.PersistValue(lock.Value)
 			if err != nil {
 				log.Error().Err(err).Msg("failed to flush back")
 				return false
 			}
 			lock.Value.SetDbVersion(lock.Value.GetVersion())
+
 			lock.Value.SetDirty(false)
+			err = tx.MarkDirty([]byte(key.(string)), false, f.WriteOption)
+			if err != nil {
+				log.Error().Err(err).Str("key", key.(string)).Msg("failed to clear dirty")
+			}
 
 			refreshCount++
 		}
@@ -491,5 +553,61 @@ func (f *WalockStoreLevelDb) FlushDirty() (err error) {
 		f.Metrics.MetricsMapCount.Set(float64(total))
 	}
 
+	return
+}
+
+func (f *WalockStoreLevelDb) LoadReservation(tx model.LevelDbStoreOperator, tryBarrierKey string) (wal model.Wal, ok bool, code string, message string, err error) {
+	walId, err := tx.Get([]byte(tryBarrierKey), nil)
+	if err != nil {
+		if errors.Is(err, leveldb.ErrNotFound) {
+			ok = false
+			code = consts.ErrReservationNotFound
+			message = "reservation not found from barrier: " + tryBarrierKey
+			return
+		}
+		log.Error().Err(err).Msg("failed to load reservation")
+		return
+	}
+
+	walBytes, err := tx.Get(walId, nil)
+	if err != nil {
+		if errors.Is(err, leveldb.ErrNotFound) {
+			ok = false
+			code = consts.ErrReservationNotFound
+			message = "reservation not found from wal: " + string(walId)
+			return
+		}
+		log.Error().Err(err).Msg("failed to load reservation")
+		return
+	}
+	wal = model.Wal{
+		Key:      string(walId),
+		WalBytes: walBytes,
+	}
+
+	ok = true
+	return
+}
+
+func (f *WalockStoreLevelDb) ClearDirtyRecords(tx model.LevelDbStoreOperator) (err error) {
+	// clear dirty by access the record once so that wal will be replayed
+	var dirtyKeys [][]byte
+	dirtyKeys, err = tx.ListDirty()
+	if err != nil {
+		log.Error().Err(err).Msg("failed to list dirty keys")
+		return
+	}
+
+	for _, key := range dirtyKeys {
+		log.Info().Str("key", string(key)).Msg("clearing dirty key")
+		var v model.LockerValue
+		v, err = f.Get(tx, model.LockerKey(key))
+		if err != nil {
+			log.Error().Err(err).Str("key", string(key)).Msg("failed to clear dirty key")
+			return err
+		} else {
+			log.Info().Str("key", string(key)).Uint64("version", v.GetVersion()).Uint64("dbVersion", v.GetDbVersion()).Msg("cleared dirty key")
+		}
+	}
 	return
 }
