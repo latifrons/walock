@@ -560,6 +560,7 @@ func (f *WalockStoreLevelDb) LoadReservation(tx model.LevelDbStoreOperator, tryB
 	walId, err := tx.Get([]byte(tryBarrierKey), nil)
 	if err != nil {
 		if errors.Is(err, leveldb.ErrNotFound) {
+			err = nil
 			ok = false
 			code = consts.ErrReservationNotFound
 			message = "reservation not found from barrier: " + tryBarrierKey
@@ -572,6 +573,7 @@ func (f *WalockStoreLevelDb) LoadReservation(tx model.LevelDbStoreOperator, tryB
 	walBytes, err := tx.Get(walId, nil)
 	if err != nil {
 		if errors.Is(err, leveldb.ErrNotFound) {
+			err = nil
 			ok = false
 			code = consts.ErrReservationNotFound
 			message = "reservation not found from wal: " + string(walId)
